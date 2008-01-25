@@ -35,8 +35,6 @@ config PREEMPT_VOLUNTARY
 
 config PREEMPT
 	bool "Preemptible Kernel (Low-Latency Desktop)"
-	select PREEMPT_COUNT
-	select UNINLINE_SPIN_UNLOCK if !ARCH_INLINE_SPIN_UNLOCK
 	help
 	  This option reduces the latency of the kernel by making
 	  all kernel code (that is not executing in a critical section)
@@ -54,5 +52,25 @@ config PREEMPT
 
 endchoice
 
-config PREEMPT_COUNT
-       bool
+config PREEMPT_BKL
+	bool "Preempt The Big Kernel Lock"
+	depends on SMP || PREEMPT
+	default y
+	help
+	  This option reduces the latency of the kernel by making the
+	  big kernel lock preemptible.
+
+	  Say Y here if you are building a kernel for a desktop system.
+	  Say N if you are unsure.
+
+config RCU_TRACE
+	bool "Enable tracing for RCU - currently stats in debugfs"
+	select DEBUG_FS
+	default y
+	help
+	  This option provides tracing in RCU which presents stats
+	  in debugfs for debugging RCU implementation.
+
+	  Say Y here if you want to enable RCU tracing
+	  Say N if you are unsure.
+

@@ -1071,6 +1071,11 @@ struct task_struct {
 	int rcu_flipctr_idx;
 #endif /* #ifdef CONFIG_PREEMPT_RCU */
 
+#ifdef CONFIG_PREEMPT_RCU
+	int rcu_read_lock_nesting;
+	int rcu_flipctr_idx;
+#endif /* #ifdef CONFIG_PREEMPT_RCU */
+
 #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
 	struct sched_info sched_info;
 #endif
