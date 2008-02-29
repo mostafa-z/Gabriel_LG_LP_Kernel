@@ -416,6 +416,7 @@ static void tick_nohz_stop_sched_tick(struct tick_sched *ts)
 			ts->idle_tick = hrtimer_get_expires(&ts->sched_timer);
 			ts->tick_stopped = 1;
 			ts->idle_jiffies = last_jiffies;
+			rcu_enter_nohz();
 		}
 
 		ts->idle_sleeps++;
@@ -582,6 +583,8 @@ void tick_nohz_idle_exit(void)
 		local_irq_enable();
 		return;
 	}
+
+	rcu_exit_nohz();
 
 	/* Update jiffies first */
 	select_nohz_load_balancer(0);
