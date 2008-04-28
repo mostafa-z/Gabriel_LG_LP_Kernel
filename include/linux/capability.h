@@ -7,7 +7,7 @@
  *
  * See here for the libcap library ("POSIX draft" compliance):
  *
- * ftp://www.kernel.org/pub/linux/libs/security/linux-privs/kernel-2.6/
+ * ftp://linux.kernel.org/pub/linux/libs/security/linux-privs/kernel-2.6/
  */
 
 #ifndef _LINUX_CAPABILITY_H
@@ -31,11 +31,11 @@ struct task_struct;
 #define _LINUX_CAPABILITY_VERSION_1  0x19980330
 #define _LINUX_CAPABILITY_U32S_1     1
 
-#define _LINUX_CAPABILITY_VERSION_2  0x20071026  /* deprecated - use v3 */
+#define _LINUX_CAPABILITY_VERSION_2  0x20071026
 #define _LINUX_CAPABILITY_U32S_2     2
 
-#define _LINUX_CAPABILITY_VERSION_3  0x20080522
-#define _LINUX_CAPABILITY_U32S_3     2
+#define _LINUX_CAPABILITY_VERSION    _LINUX_CAPABILITY_VERSION_2
+#define _LINUX_CAPABILITY_U32S       _LINUX_CAPABILITY_U32S_2
 
 typedef struct __user_cap_header_struct {
 	__u32 version;
@@ -49,8 +49,10 @@ typedef struct __user_cap_data_struct {
 } __user *cap_user_data_t;
 
 
+#define XATTR_CAPS_SUFFIX "capability"
+#define XATTR_NAME_CAPS XATTR_SECURITY_PREFIX XATTR_CAPS_SUFFIX
+
 #define VFS_CAP_REVISION_MASK	0xFF000000
-#define VFS_CAP_REVISION_SHIFT	24
 #define VFS_CAP_FLAGS_MASK	~VFS_CAP_REVISION_MASK
 #define VFS_CAP_FLAGS_EFFECTIVE	0x000001
 
@@ -66,6 +68,7 @@ typedef struct __user_cap_data_struct {
 #define VFS_CAP_U32             VFS_CAP_U32_2
 #define VFS_CAP_REVISION	VFS_CAP_REVISION_2
 
+
 struct vfs_cap_data {
 	__le32 magic_etc;            /* Little endian */
 	struct {
@@ -74,33 +77,11 @@ struct vfs_cap_data {
 	} data[VFS_CAP_U32];
 };
 
-#ifndef __KERNEL__
-
-/*
- * Backwardly compatible definition for source code - trapped in a
- * 32-bit world. If you find you need this, please consider using
- * libcap to untrap yourself...
- */
-#define _LINUX_CAPABILITY_VERSION  _LINUX_CAPABILITY_VERSION_1
-#define _LINUX_CAPABILITY_U32S     _LINUX_CAPABILITY_U32S_1
-
-#else
-
-#define _KERNEL_CAPABILITY_VERSION _LINUX_CAPABILITY_VERSION_3
-#define _KERNEL_CAPABILITY_U32S    _LINUX_CAPABILITY_U32S_3
-
-extern int file_caps_enabled;
+#ifdef __KERNEL__
 
 typedef struct kernel_cap_struct {
-	__u32 cap[_KERNEL_CAPABILITY_U32S];
+	__u32 cap[_LINUX_CAPABILITY_U32S];
 } kernel_cap_t;
-
-/* exact same as vfs_cap_data but in cpu endian and always filled completely */
-struct cpu_vfs_cap_data {
-	__u32 magic_etc;
-	kernel_cap_t permitted;
-	kernel_cap_t inheritable;
-};
 
 #define _USER_CAP_HEADER_SIZE  (sizeof(struct __user_cap_header_struct))
 #define _KERNEL_CAP_T_SIZE     (sizeof(kernel_cap_t))
@@ -198,7 +179,7 @@ struct cpu_vfs_cap_data {
 /* Allow modification of routing tables */
 /* Allow setting arbitrary process / process group ownership on
    sockets */
-/* Allow binding to any address for transparent proxying (also via NET_RAW) */
+/* Allow binding to any address for transparent proxying */
 /* Allow setting TOS (type of service) */
 /* Allow setting promiscuous mode */
 /* Allow clearing driver statistics */
@@ -210,7 +191,6 @@ struct cpu_vfs_cap_data {
 
 /* Allow use of RAW sockets */
 /* Allow use of PACKET sockets */
-/* Allow binding to any address for transparent proxying (also via NET_ADMIN) */
 
 #define CAP_NET_RAW          13
 
@@ -247,6 +227,7 @@ struct cpu_vfs_cap_data {
 /* Allow configuration of the secure attention key */
 /* Allow administration of the random device */
 /* Allow examination and configuration of disk quotas */
+/* Allow configuring the kernel's syslog (printk behaviour) */
 /* Allow setting the domainname */
 /* Allow setting the hostname */
 /* Allow calling bdflush() */
@@ -352,16 +333,7 @@ struct cpu_vfs_cap_data {
 
 #define CAP_MAC_ADMIN        33
 
-/* Allow configuring the kernel's syslog (printk behaviour) */
-
-#define CAP_SYSLOG           34
-
-/* Allow triggering something that will wake the system */
-
-#define CAP_WAKE_ALARM            35
-
-
-#define CAP_LAST_CAP         CAP_WAKE_ALARM
+#define CAP_LAST_CAP         CAP_MAC_ADMIN
 
 #define cap_valid(x) ((x) >= 0 && (x) <= CAP_LAST_CAP)
 
@@ -374,36 +346,14 @@ struct cpu_vfs_cap_data {
 
 #ifdef __KERNEL__
 
-struct dentry;
-struct user_namespace;
-
-struct user_namespace *current_user_ns(void);
-
-extern const kernel_cap_t __cap_empty_set;
-extern const kernel_cap_t __cap_init_eff_set;
-
 /*
  * Internal kernel functions only
  */
 
 #define CAP_FOR_EACH_U32(__capi)  \
-	for (__capi = 0; __capi < _KERNEL_CAPABILITY_U32S; ++__capi)
-
-/*
- * CAP_FS_MASK and CAP_NFSD_MASKS:
- *
- * The fs mask is all the privileges that fsuid==0 historically meant.
- * At one time in the past, that included CAP_MKNOD and CAP_LINUX_IMMUTABLE.
- *
- * It has never meant setting security.* and trusted.* xattrs.
- *
- * We could also define fsmask as follows:
- *   1. CAP_FS_MASK is the privilege to bypass all fs-related DAC permissions
- *   2. The security.* and trusted.* xattrs are fs-related MAC permissions
- */
+	for (__capi = 0; __capi < _LINUX_CAPABILITY_U32S; ++__capi)
 
 # define CAP_FS_MASK_B0     (CAP_TO_MASK(CAP_CHOWN)		\
-			    | CAP_TO_MASK(CAP_MKNOD)		\
 			    | CAP_TO_MASK(CAP_DAC_OVERRIDE)	\
 			    | CAP_TO_MASK(CAP_DAC_READ_SEARCH)	\
 			    | CAP_TO_MASK(CAP_FOWNER)		\
@@ -411,22 +361,24 @@ extern const kernel_cap_t __cap_init_eff_set;
 
 # define CAP_FS_MASK_B1     (CAP_TO_MASK(CAP_MAC_OVERRIDE))
 
-#if _KERNEL_CAPABILITY_U32S != 2
+#if _LINUX_CAPABILITY_U32S != 2
 # error Fix up hand-coded capability macro initializers
 #else /* HAND-CODED capability initializers */
 
-# define CAP_EMPTY_SET    ((kernel_cap_t){{ 0, 0 }})
-# define CAP_FULL_SET     ((kernel_cap_t){{ ~0, ~0 }})
-# define CAP_FS_SET       ((kernel_cap_t){{ CAP_FS_MASK_B0 \
-				    | CAP_TO_MASK(CAP_LINUX_IMMUTABLE), \
-				    CAP_FS_MASK_B1 } })
-# define CAP_NFSD_SET     ((kernel_cap_t){{ CAP_FS_MASK_B0 \
-				    | CAP_TO_MASK(CAP_SYS_RESOURCE), \
-				    CAP_FS_MASK_B1 } })
+# define CAP_EMPTY_SET    {{ 0, 0 }}
+# define CAP_FULL_SET     {{ ~0, ~0 }}
+# define CAP_INIT_EFF_SET {{ ~CAP_TO_MASK(CAP_SETPCAP), ~0 }}
+# define CAP_FS_SET       {{ CAP_FS_MASK_B0, CAP_FS_MASK_B1 } }
+# define CAP_NFSD_SET     {{ CAP_FS_MASK_B0|CAP_TO_MASK(CAP_SYS_RESOURCE), \
+			     CAP_FS_MASK_B1 } }
 
-#endif /* _KERNEL_CAPABILITY_U32S != 2 */
+#endif /* _LINUX_CAPABILITY_U32S != 2 */
+
+#define CAP_INIT_INH_SET    CAP_EMPTY_SET
 
 # define cap_clear(c)         do { (c) = __cap_empty_set; } while (0)
+# define cap_set_full(c)      do { (c) = __cap_full_set; } while (0)
+# define cap_set_init_eff(c)  do { (c) = __cap_init_eff_set; } while (0)
 
 #define cap_raise(c, flag)  ((c).cap[CAP_TO_INDEX(flag)] |= CAP_TO_MASK(flag))
 #define cap_lower(c, flag)  ((c).cap[CAP_TO_INDEX(flag)] &= ~CAP_TO_MASK(flag))
@@ -489,13 +441,6 @@ static inline int cap_isclear(const kernel_cap_t a)
 	return 1;
 }
 
-/*
- * Check if "a" is a subset of "set".
- * return 1 if ALL of the capabilities in "a" are also in "set"
- *	cap_issubset(0101, 1111) will return 1
- * return 0 if ANY of the capabilities in "a" are not in "set"
- *	cap_issubset(1111, 0101) will return 0
- */
 static inline int cap_issubset(const kernel_cap_t a, const kernel_cap_t set)
 {
 	kernel_cap_t dest;
@@ -539,19 +484,14 @@ static inline kernel_cap_t cap_raise_nfsd_set(const kernel_cap_t a,
 			   cap_intersect(permitted, __cap_nfsd_set));
 }
 
-extern bool has_capability(struct task_struct *t, int cap);
-extern bool has_ns_capability(struct task_struct *t,
-			      struct user_namespace *ns, int cap);
-extern bool has_capability_noaudit(struct task_struct *t, int cap);
-extern bool has_ns_capability_noaudit(struct task_struct *t,
-				      struct user_namespace *ns, int cap);
-extern bool capable(int cap);
-extern bool ns_capable(struct user_namespace *ns, int cap);
-extern bool nsown_capable(int cap);
+extern const kernel_cap_t __cap_empty_set;
+extern const kernel_cap_t __cap_full_set;
+extern const kernel_cap_t __cap_init_eff_set;
 
-/* audit system wants to get cap info from files as well */
-extern int get_vfs_caps_from_disk(const struct dentry *dentry, struct cpu_vfs_cap_data *cpu_caps);
+int capable(int cap);
+int __capable(struct task_struct *t, int cap);
 
 #endif /* __KERNEL__ */
 
 #endif /* !_LINUX_CAPABILITY_H */
+
