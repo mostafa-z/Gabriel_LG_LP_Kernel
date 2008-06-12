@@ -13,32 +13,44 @@
 #include <linux/clockchips.h>
 #include <linux/kernel_stat.h>
 #include <linux/math64.h>
-#include <linux/gfp.h>
 
-#include <asm/pvclock.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/xen/hypercall.h>
 
 #include <xen/events.h>
-#include <xen/features.h>
 #include <xen/interface/xen.h>
 #include <xen/interface/vcpu.h>
 
 #include "xen-ops.h"
 
+#define XEN_SHIFT 22
+
 /* Xen may fire a timer up to this many ns early */
 #define TIMER_SLOP	100000
 #define NS_PER_TICK	(1000000000LL / HZ)
 
+static cycle_t xen_clocksource_read(void);
+
+/* These are perodically updated in shared_info, and then copied here. */
+struct shadow_time_info {
+	u64 tsc_timestamp;     /* TSC at last update of time vals.  */
+	u64 system_timestamp;  /* Time, in nanosecs, since boot.    */
+	u32 tsc_to_nsec_mul;
+	int tsc_shift;
+	u32 version;
+};
+
+static DEFINE_PER_CPU(struct shadow_time_info, shadow_time);
+
 /* runstate info updated by Xen */
-static DEFINE_PER_CPU(struct vcpu_runstate_info, xen_runstate);
+static DEFINE_PER_CPU(struct vcpu_runstate_info, runstate);
 
 /* snapshots of runstate info */
-static DEFINE_PER_CPU(struct vcpu_runstate_info, xen_runstate_snapshot);
+static DEFINE_PER_CPU(struct vcpu_runstate_info, runstate_snapshot);
 
 /* unused ns of stolen and blocked time */
-static DEFINE_PER_CPU(u64, xen_residual_stolen);
-static DEFINE_PER_CPU(u64, xen_residual_blocked);
+static DEFINE_PER_CPU(u64, residual_stolen);
+static DEFINE_PER_CPU(u64, residual_blocked);
 
 /* return an consistent snapshot of 64-bit time/counter value */
 static u64 get64(const u64 *p)
@@ -79,7 +91,7 @@ static void get_runstate_snapshot(struct vcpu_runstate_info *res)
 
 	BUG_ON(preemptible());
 
-	state = &__get_cpu_var(xen_runstate);
+	state = &__get_cpu_var(runstate);
 
 	/*
 	 * The runstate info is always updated by the hypervisor on
@@ -97,14 +109,14 @@ static void get_runstate_snapshot(struct vcpu_runstate_info *res)
 /* return true when a vcpu could run but has no real cpu to run on */
 bool xen_vcpu_stolen(int vcpu)
 {
-	return per_cpu(xen_runstate, vcpu).state == RUNSTATE_runnable;
+	return per_cpu(runstate, vcpu).state == RUNSTATE_runnable;
 }
 
-void xen_setup_runstate_info(int cpu)
+static void setup_runstate_info(int cpu)
 {
 	struct vcpu_register_runstate_memory_area area;
 
-	area.addr.v = &per_cpu(xen_runstate, cpu);
+	area.addr.v = &per_cpu(runstate, cpu);
 
 	if (HYPERVISOR_vcpu_op(VCPUOP_register_runstate_memory_area,
 			       cpu, &area))
@@ -122,7 +134,7 @@ static void do_stolen_accounting(void)
 
 	WARN_ON(state.state != RUNSTATE_running);
 
-	snap = &__get_cpu_var(xen_runstate_snapshot);
+	snap = &__get_cpu_var(runstate_snapshot);
 
 	/* work out how much time the VCPU has not been runn*ing*  */
 	blocked = state.time[RUNSTATE_blocked] - snap->time[RUNSTATE_blocked];
@@ -132,98 +144,224 @@ static void do_stolen_accounting(void)
 	*snap = state;
 
 	/* Add the appropriate number of ticks of stolen time,
-	   including any left-overs from last time. */
-	stolen = runnable + offline + __this_cpu_read(xen_residual_stolen);
+	   including any left-overs from last time.  Passing NULL to
+	   account_steal_time accounts the time as stolen. */
+	stolen = runnable + offline + __get_cpu_var(residual_stolen);
 
 	if (stolen < 0)
 		stolen = 0;
 
 	ticks = iter_div_u64_rem(stolen, NS_PER_TICK, &stolen);
-	__this_cpu_write(xen_residual_stolen, stolen);
-	account_steal_ticks(ticks);
+	__get_cpu_var(residual_stolen) = stolen;
+	account_steal_time(NULL, ticks);
 
 	/* Add the appropriate number of ticks of blocked time,
-	   including any left-overs from last time. */
-	blocked += __this_cpu_read(xen_residual_blocked);
+	   including any left-overs from last time.  Passing idle to
+	   account_steal_time accounts the time as idle/wait. */
+	blocked += __get_cpu_var(residual_blocked);
 
 	if (blocked < 0)
 		blocked = 0;
 
 	ticks = iter_div_u64_rem(blocked, NS_PER_TICK, &blocked);
-	__this_cpu_write(xen_residual_blocked, blocked);
-	account_idle_ticks(ticks);
+	__get_cpu_var(residual_blocked) = blocked;
+	account_steal_time(idle_task(smp_processor_id()), ticks);
 }
 
-/* Get the TSC speed from Xen */
-static unsigned long xen_tsc_khz(void)
+/*
+ * Xen sched_clock implementation.  Returns the number of unstolen
+ * nanoseconds, which is nanoseconds the VCPU spent in RUNNING+BLOCKED
+ * states.
+ */
+unsigned long long xen_sched_clock(void)
 {
-	struct pvclock_vcpu_time_info *info =
-		&HYPERVISOR_shared_info->vcpu_info[0].time;
+	struct vcpu_runstate_info state;
+	cycle_t now;
+	u64 ret;
+	s64 offset;
 
-	return pvclock_tsc_khz(info);
-}
+	/*
+	 * Ideally sched_clock should be called on a per-cpu basis
+	 * anyway, so preempt should already be disabled, but that's
+	 * not current practice at the moment.
+	 */
+	preempt_disable();
 
-cycle_t xen_clocksource_read(void)
-{
-        struct pvclock_vcpu_time_info *src;
-	cycle_t ret;
+	now = xen_clocksource_read();
 
-	preempt_disable_notrace();
-	src = &__get_cpu_var(xen_vcpu)->time;
-	ret = pvclock_clocksource_read(src);
-	preempt_enable_notrace();
+	get_runstate_snapshot(&state);
+
+	WARN_ON(state.state != RUNSTATE_running);
+
+	offset = now - state.state_entry_time;
+	if (offset < 0)
+		offset = 0;
+
+	ret = state.time[RUNSTATE_blocked] +
+		state.time[RUNSTATE_running] +
+		offset;
+
+	preempt_enable();
+
 	return ret;
 }
 
-static cycle_t xen_clocksource_get_cycles(struct clocksource *cs)
+
+/* Get the CPU speed from Xen */
+unsigned long xen_cpu_khz(void)
 {
-	return xen_clocksource_read();
+	u64 xen_khz = 1000000ULL << 32;
+	const struct vcpu_time_info *info =
+		&HYPERVISOR_shared_info->vcpu_info[0].time;
+
+	do_div(xen_khz, info->tsc_to_system_mul);
+	if (info->tsc_shift < 0)
+		xen_khz <<= -info->tsc_shift;
+	else
+		xen_khz >>= info->tsc_shift;
+
+	return xen_khz;
+}
+
+/*
+ * Reads a consistent set of time-base values from Xen, into a shadow data
+ * area.
+ */
+static unsigned get_time_values_from_xen(void)
+{
+	struct vcpu_time_info   *src;
+	struct shadow_time_info *dst;
+
+	/* src is shared memory with the hypervisor, so we need to
+	   make sure we get a consistent snapshot, even in the face of
+	   being preempted. */
+	src = &__get_cpu_var(xen_vcpu)->time;
+	dst = &__get_cpu_var(shadow_time);
+
+	do {
+		dst->version = src->version;
+		rmb();		/* fetch version before data */
+		dst->tsc_timestamp     = src->tsc_timestamp;
+		dst->system_timestamp  = src->system_time;
+		dst->tsc_to_nsec_mul   = src->tsc_to_system_mul;
+		dst->tsc_shift         = src->tsc_shift;
+		rmb();		/* test version after fetching data */
+	} while ((src->version & 1) | (dst->version ^ src->version));
+
+	return dst->version;
+}
+
+/*
+ * Scale a 64-bit delta by scaling and multiplying by a 32-bit fraction,
+ * yielding a 64-bit result.
+ */
+static inline u64 scale_delta(u64 delta, u32 mul_frac, int shift)
+{
+	u64 product;
+#ifdef __i386__
+	u32 tmp1, tmp2;
+#endif
+
+	if (shift < 0)
+		delta >>= -shift;
+	else
+		delta <<= shift;
+
+#ifdef __i386__
+	__asm__ (
+		"mul  %5       ; "
+		"mov  %4,%%eax ; "
+		"mov  %%edx,%4 ; "
+		"mul  %5       ; "
+		"xor  %5,%5    ; "
+		"add  %4,%%eax ; "
+		"adc  %5,%%edx ; "
+		: "=A" (product), "=r" (tmp1), "=r" (tmp2)
+		: "a" ((u32)delta), "1" ((u32)(delta >> 32)), "2" (mul_frac) );
+#elif __x86_64__
+	__asm__ (
+		"mul %%rdx ; shrd $32,%%rdx,%%rax"
+		: "=a" (product) : "0" (delta), "d" ((u64)mul_frac) );
+#else
+#error implement me!
+#endif
+
+	return product;
+}
+
+static u64 get_nsec_offset(struct shadow_time_info *shadow)
+{
+	u64 now, delta;
+	now = native_read_tsc();
+	delta = now - shadow->tsc_timestamp;
+	return scale_delta(delta, shadow->tsc_to_nsec_mul, shadow->tsc_shift);
+}
+
+static cycle_t xen_clocksource_read(void)
+{
+	struct shadow_time_info *shadow = &get_cpu_var(shadow_time);
+	cycle_t ret;
+	unsigned version;
+
+	do {
+		version = get_time_values_from_xen();
+		barrier();
+		ret = shadow->system_timestamp + get_nsec_offset(shadow);
+		barrier();
+	} while (version != __get_cpu_var(xen_vcpu)->time.version);
+
+	put_cpu_var(shadow_time);
+
+	return ret;
 }
 
 static void xen_read_wallclock(struct timespec *ts)
 {
-	struct shared_info *s = HYPERVISOR_shared_info;
-	struct pvclock_wall_clock *wall_clock = &(s->wc);
-        struct pvclock_vcpu_time_info *vcpu_time;
+	const struct shared_info *s = HYPERVISOR_shared_info;
+	u32 version;
+	u64 delta;
+	struct timespec now;
 
-	vcpu_time = &get_cpu_var(xen_vcpu)->time;
-	pvclock_read_wallclock(wall_clock, vcpu_time, ts);
-	put_cpu_var(xen_vcpu);
+	/* get wallclock at system boot */
+	do {
+		version = s->wc_version;
+		rmb();		/* fetch version before time */
+		now.tv_sec  = s->wc_sec;
+		now.tv_nsec = s->wc_nsec;
+		rmb();		/* fetch time before checking version */
+	} while ((s->wc_version & 1) | (version ^ s->wc_version));
+
+	delta = xen_clocksource_read();	/* time since system boot */
+	delta += now.tv_sec * (u64)NSEC_PER_SEC + now.tv_nsec;
+
+	now.tv_nsec = do_div(delta, NSEC_PER_SEC);
+	now.tv_sec = delta;
+
+	set_normalized_timespec(ts, now.tv_sec, now.tv_nsec);
 }
 
-static unsigned long xen_get_wallclock(void)
+unsigned long xen_get_wallclock(void)
 {
 	struct timespec ts;
 
 	xen_read_wallclock(&ts);
+
 	return ts.tv_sec;
 }
 
-static int xen_set_wallclock(unsigned long now)
+int xen_set_wallclock(unsigned long now)
 {
-	struct xen_platform_op op;
-	int rc;
-
 	/* do nothing for domU */
-	if (!xen_initial_domain())
-		return -1;
-
-	op.cmd = XENPF_settime;
-	op.u.settime.secs = now;
-	op.u.settime.nsecs = 0;
-	op.u.settime.system_time = xen_clocksource_read();
-
-	rc = HYPERVISOR_dom0_op(&op);
-	WARN(rc != 0, "XENPF_settime failed: now=%ld\n", now);
-
-	return rc;
+	return -1;
 }
 
 static struct clocksource xen_clocksource __read_mostly = {
 	.name = "xen",
 	.rating = 400,
-	.read = xen_clocksource_get_cycles,
+	.read = xen_clocksource_read,
 	.mask = ~0,
+	.mult = 1<<XEN_SHIFT,		/* time directly in nanoseconds */
+	.shift = XEN_SHIFT,
 	.flags = CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
@@ -408,24 +546,16 @@ void xen_setup_timer(int cpu)
 		name = "<timer kasprintf failed>";
 
 	irq = bind_virq_to_irqhandler(VIRQ_TIMER, cpu, xen_timer_interrupt,
-				      IRQF_DISABLED|IRQF_PERCPU|
-				      IRQF_NOBALANCING|IRQF_TIMER|
-				      IRQF_FORCE_RESUME,
+				      IRQF_DISABLED|IRQF_PERCPU|IRQF_NOBALANCING,
 				      name, NULL);
 
 	evt = &per_cpu(xen_clock_events, cpu);
 	memcpy(evt, xen_clockevent, sizeof(*evt));
 
-	evt->cpumask = cpumask_of(cpu);
+	evt->cpumask = cpumask_of_cpu(cpu);
 	evt->irq = irq;
-}
 
-void xen_teardown_timer(int cpu)
-{
-	struct clock_event_device *evt;
-	BUG_ON(cpu == 0);
-	evt = &per_cpu(xen_clock_events, cpu);
-	unbind_from_irqhandler(evt->irq, NULL);
+	setup_runstate_info(cpu);
 }
 
 void xen_setup_cpu_clockevents(void)
@@ -435,31 +565,13 @@ void xen_setup_cpu_clockevents(void)
 	clockevents_register_device(&__get_cpu_var(xen_clock_events));
 }
 
-void xen_timer_resume(void)
-{
-	int cpu;
-
-	pvclock_resume();
-
-	if (xen_clockevent != &xen_vcpuop_clockevent)
-		return;
-
-	for_each_online_cpu(cpu) {
-		if (HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, cpu, NULL))
-			BUG();
-	}
-}
-
-static const struct pv_time_ops xen_time_ops __initconst = {
-	.sched_clock = xen_clocksource_read,
-};
-
-static void __init xen_time_init(void)
+__init void xen_time_init(void)
 {
 	int cpu = smp_processor_id();
-	struct timespec tp;
 
-	clocksource_register_hz(&xen_clocksource, NSEC_PER_SEC);
+	get_time_values_from_xen();
+
+	clocksource_register(&xen_clocksource);
 
 	if (HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, cpu, NULL) == 0) {
 		/* Successfully turned off 100Hz tick, so we have the
@@ -469,57 +581,13 @@ static void __init xen_time_init(void)
 	}
 
 	/* Set initial system time with full resolution */
-	xen_read_wallclock(&tp);
-	do_settimeofday(&tp);
+	xen_read_wallclock(&xtime);
+	set_normalized_timespec(&wall_to_monotonic,
+				-xtime.tv_sec, -xtime.tv_nsec);
 
 	setup_force_cpu_cap(X86_FEATURE_TSC);
 
-	xen_setup_runstate_info(cpu);
 	xen_setup_timer(cpu);
 	xen_setup_cpu_clockevents();
 }
 
-void __init xen_init_time_ops(void)
-{
-	pv_time_ops = xen_time_ops;
-
-	x86_init.timers.timer_init = xen_time_init;
-	x86_init.timers.setup_percpu_clockev = x86_init_noop;
-	x86_cpuinit.setup_percpu_clockev = x86_init_noop;
-
-	x86_platform.calibrate_tsc = xen_tsc_khz;
-	x86_platform.get_wallclock = xen_get_wallclock;
-	x86_platform.set_wallclock = xen_set_wallclock;
-}
-
-#ifdef CONFIG_XEN_PVHVM
-static void xen_hvm_setup_cpu_clockevents(void)
-{
-	int cpu = smp_processor_id();
-	xen_setup_runstate_info(cpu);
-	xen_setup_timer(cpu);
-	xen_setup_cpu_clockevents();
-}
-
-void __init xen_hvm_init_time_ops(void)
-{
-	/* vector callback is needed otherwise we cannot receive interrupts
-	 * on cpu > 0 and at this point we don't know how many cpus are
-	 * available */
-	if (!xen_have_vector_callback)
-		return;
-	if (!xen_feature(XENFEAT_hvm_safe_pvclock)) {
-		printk(KERN_INFO "Xen doesn't support pvclock on HVM,"
-				"disable pv timer\n");
-		return;
-	}
-
-	pv_time_ops = xen_time_ops;
-	x86_init.timers.setup_percpu_clockev = xen_time_init;
-	x86_cpuinit.setup_percpu_clockev = xen_hvm_setup_cpu_clockevents;
-
-	x86_platform.calibrate_tsc = xen_tsc_khz;
-	x86_platform.get_wallclock = xen_get_wallclock;
-	x86_platform.set_wallclock = xen_set_wallclock;
-}
-#endif
