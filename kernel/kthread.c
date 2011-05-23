@@ -11,7 +11,7 @@
 #include <linux/err.h>
 #include <linux/unistd.h>
 #include <linux/file.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/mutex.h>
 
 #define KTHREAD_NICE_LEVEL (-5)
