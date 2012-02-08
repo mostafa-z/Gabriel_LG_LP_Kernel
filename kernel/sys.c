@@ -93,10 +93,8 @@
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
 
-#ifdef CONFIG_UID16
 EXPORT_SYMBOL(overflowuid);
 EXPORT_SYMBOL(overflowgid);
-#endif
 
 /*
  * the same as above, but for filesystems which can only store a 16-bit
@@ -177,6 +175,7 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 	const struct cred *cred = current_cred();
 	int error = -EINVAL;
 	struct pid *pgrp;
+	kuid_t uid;
 
 	if (which > PRIO_USER || which < PRIO_PROCESS)
 		goto out;
@@ -209,18 +208,19 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
+			uid = make_kuid(cred->user_ns, who);
 			user = cred->user;
 			if (!who)
-				who = cred->uid;
-			else if ((who != cred->uid) &&
-				 !(user = find_user(who)))
+				uid = cred->uid;
+			else if (!uid_eq(uid, cred->uid) &&
+				 !(user = find_user(uid)))
 				goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p) {
-				if (__task_cred(p)->uid == who)
+				if (uid_eq(task_uid(p), uid))
 					error = set_one_prio(p, niceval, error);
 			} while_each_thread(g, p);
-			if (who != cred->uid)
+			if (!uid_eq(uid, cred->uid))
 				free_uid(user);		/* For find_user() */
 			break;
 	}
@@ -244,6 +244,7 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 	const struct cred *cred = current_cred();
 	long niceval, retval = -ESRCH;
 	struct pid *pgrp;
+	kuid_t uid;
 
 	if (which > PRIO_USER || which < PRIO_PROCESS)
 		return -EINVAL;
@@ -274,21 +275,22 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
+			uid = make_kuid(cred->user_ns, who);
 			user = cred->user;
 			if (!who)
-				who = cred->uid;
-			else if ((who != cred->uid) &&
-				 !(user = find_user(who)))
+				uid = cred->uid;
+			else if (!uid_eq(uid, cred->uid) &&
+				 !(user = find_user(uid)))
 				goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p) {
-				if (__task_cred(p)->uid == who) {
+				if (uid_eq(task_uid(p), uid)) {
 					niceval = 20 - task_nice(p);
 					if (niceval > retval)
 						retval = niceval;
 				}
 			} while_each_thread(g, p);
-			if (who != cred->uid)
+			if (!uid_eq(uid, cred->uid))
 				free_uid(user);		/* for find_user() */
 			break;
 	}
@@ -631,7 +633,7 @@ static int set_user(struct cred *new)
 {
 	struct user_struct *new_user;
 
-	new_user = alloc_uid(current_user_ns(), new->uid);
+	new_user = alloc_uid(new->uid);
 	if (!new_user)
 		return -EAGAIN;
 
@@ -1908,7 +1910,7 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = prctl_get_seccomp();
 			break;
 		case PR_SET_SECCOMP:
-			error = prctl_set_seccomp(arg2, (char __user *)arg3);
+			error = prctl_set_seccomp(arg2);
 			break;
 		case PR_GET_TSC:
 			error = GET_TSC_CTL(arg2);
@@ -1979,16 +1981,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = put_user(me->signal->is_child_subreaper,
 					 (int __user *) arg2);
 			break;
-		case PR_SET_NO_NEW_PRIVS:
-			if (arg2 != 1 || arg3 || arg4 || arg5)
-				return -EINVAL;
-
-			current->no_new_privs = 1;
-			break;
-		case PR_GET_NO_NEW_PRIVS:
-			if (arg2 || arg3 || arg4 || arg5)
-				return -EINVAL;
-			return current->no_new_privs ? 1 : 0;
 		default:
 			error = -EINVAL;
 			break;
