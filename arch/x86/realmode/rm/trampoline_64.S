@@ -10,7 +10,7 @@
  *	trampoline page to make our stack and everything else
  *	is a mystery.
  *
- *	On entry to trampoline_data, the processor is in real mode
+ *	On entry to trampoline_start, the processor is in real mode
  *	with 16-bit addressing and 16-bit data.  CS has some value
  *	and IP is zero.  Thus, data addresses need to be absolute
  *	(no relocation) and are taken with regard to r_base.
@@ -36,7 +36,7 @@
 	.balign PAGE_SIZE
 	.code16
 
-ENTRY(trampoline_data)
+ENTRY(trampoline_start)
 	cli			# We should be safe anyway
 	wbinvd
 
@@ -89,11 +89,16 @@ ENTRY(startup_32)
 	movl	$X86_CR4_PAE, %eax
 	movl	%eax, %cr4		# Enable PAE mode
 
+<<<<<<< HEAD
 	movl	pa_startup_64_smp, %esi
 	movl	pa_startup_64_smp_high, %edi
 
 					# Setup trampoline 4 level pagetables
 	leal	pa_trampoline_level4_pgt, %eax
+=======
+	# Setup trampoline 4 level pagetables
+	movl	$pa_trampoline_pgd, %eax
+>>>>>>> f37240f... x86, realmode: header for trampoline code
 	movl	%eax, %cr3
 
 	movl	$MSR_EFER, %ecx
@@ -118,10 +123,14 @@ ENTRY(startup_32)
 	.balign 4
 ENTRY(startup_64)
 	# Now jump into the kernel using virtual addresses
+<<<<<<< HEAD
 	movl	%edi, %eax
 	shlq	$32, %rax
 	addl	%esi, %eax
 	jmp	*%rax
+=======
+	jmpq	*tr_start(%rip)
+>>>>>>> f37240f... x86, realmode: header for trampoline code
 
 	# Careful these need to be in the same 64K segment as the above;
 tidt:
@@ -141,6 +150,7 @@ tgdt:
 	.quad	0x00cf93000000ffff	# __KERNEL_DS
 tgdt_end:
 
+<<<<<<< HEAD
 	.balign 4
 startup_32_vector:
 	.long	pa_startup_32
@@ -173,3 +183,6 @@ ENTRY(trampoline_level4_pgt)
 	.globl	startup_64_smp_high
 startup_64_smp:		.long 0
 startup_64_smp_high:	.long 0
+=======
+#include "trampoline_common.S"
+>>>>>>> f37240f... x86, realmode: header for trampoline code
