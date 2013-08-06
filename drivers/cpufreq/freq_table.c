@@ -9,10 +9,10 @@
  *
  */
 
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/init.h>
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/cpufreq.h>
+#include <linux/module.h>
 
 /*********************************************************************
  *                     FREQUENCY TABLE HELPERS                       *
@@ -32,8 +32,8 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 
 			continue;
 		}
-		pr_debug("table entry %u: %u kHz, %u index\n",
-					i, freq, table[i].index);
+		pr_debug("table entry %u: %u kHz, %u driver_data\n",
+					i, freq, table[i].driver_data);
 		if (freq < min_freq)
 			min_freq = freq;
 		if (freq > max_freq)
@@ -95,11 +95,11 @@ int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 				   unsigned int *index)
 {
 	struct cpufreq_frequency_table optimal = {
-		.index = ~0,
+		.driver_data = ~0,
 		.frequency = 0,
 	};
 	struct cpufreq_frequency_table suboptimal = {
-		.index = ~0,
+		.driver_data = ~0,
 		.frequency = 0,
 	};
 	unsigned int i;
@@ -127,12 +127,12 @@ int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 			if (freq <= target_freq) {
 				if (freq >= optimal.frequency) {
 					optimal.frequency = freq;
-					optimal.index = i;
+					optimal.driver_data = i;
 				}
 			} else {
 				if (freq <= suboptimal.frequency) {
 					suboptimal.frequency = freq;
-					suboptimal.index = i;
+					suboptimal.driver_data = i;
 				}
 			}
 			break;
@@ -140,26 +140,26 @@ int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 			if (freq >= target_freq) {
 				if (freq <= optimal.frequency) {
 					optimal.frequency = freq;
-					optimal.index = i;
+					optimal.driver_data = i;
 				}
 			} else {
 				if (freq >= suboptimal.frequency) {
 					suboptimal.frequency = freq;
-					suboptimal.index = i;
+					suboptimal.driver_data = i;
 				}
 			}
 			break;
 		}
 	}
-	if (optimal.index > i) {
-		if (suboptimal.index > i)
+	if (optimal.driver_data > i) {
+		if (suboptimal.driver_data > i)
 			return -EINVAL;
-		*index = suboptimal.index;
+		*index = suboptimal.driver_data;
 	} else
-		*index = optimal.index;
+		*index = optimal.driver_data;
 
 	pr_debug("target is %u (%u kHz, %u)\n", *index, table[*index].frequency,
-		table[*index].index);
+		table[*index].driver_data);
 
 	return 0;
 }
@@ -237,3 +237,4 @@ EXPORT_SYMBOL_GPL(cpufreq_frequency_get_table);
 MODULE_AUTHOR("Dominik Brodowski <linux@brodo.de>");
 MODULE_DESCRIPTION("CPUfreq frequency table helpers");
 MODULE_LICENSE("GPL");
+
