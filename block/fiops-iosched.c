@@ -751,7 +751,3 @@ module_exit(fiops_exit);
 MODULE_AUTHOR("Jens Axboe, Shaohua Li <shli@kernel.org>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("IOPS based IO scheduler");
-<<<<<<< HEAD
-=======
-
->>>>>>> e07ce32... IO add schedulers from 0.7x
